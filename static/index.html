@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Connect Four Arena</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">Connect Four</p>
+        <h1>Pick a mode and challenge the board.</h1>
+        <p class="subhead">
+          Human play is supported against three named agents plus a local human-vs-human mode.
+        </p>
+      </section>
+
+      <section class="panel controls">
+        <label for="mode-select">Game mode</label>
+        <div class="control-row">
+          <select id="mode-select"></select>
+          <button id="new-game-button">Start New Game</button>
+        </div>
+        <p id="mode-description" class="mode-description"></p>
+      </section>
+
+      <section class="panel game-panel">
+        <div class="status-row">
+          <div>
+            <p class="label">Status</p>
+            <p id="status-text" class="status-text">Choose a mode to begin.</p>
+          </div>
+          <div>
+            <p class="label">Session</p>
+            <p id="session-text" class="session-text">Not started</p>
+          </div>
+        </div>
+
+        <div id="column-buttons" class="column-buttons"></div>
+        <div id="board" class="board" aria-label="Connect Four board"></div>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
