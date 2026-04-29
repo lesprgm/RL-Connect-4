@@ -1,7 +1,25 @@
-import numpy as np
+import os
+import sys
+from pathlib import Path
 import random
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+venv_python = ROOT / "venv" / "bin" / "python"
+if venv_python.exists() and Path(sys.executable).resolve() != venv_python.resolve():
+    os.execv(venv_python, [str(venv_python), str(Path(__file__).resolve()), *sys.argv[1:]])
+
+import numpy as np
 import matplotlib.pyplot as plt
+
 from agent import Agent
+from connect4.agents import save_checkpoint
+
+
+ARTIFACT_DIR = ROOT / "artifacts" / "rl"
+BEST_CHECKPOINT = ARTIFACT_DIR / "best_dqn.pth"
 
 # SEMI-RANDOM OPPONENT
 # This opponent plays randomly most of the time but will take a winning move or block your agent if it sees one.
@@ -175,6 +193,7 @@ def train(episodes=100000):
     losses = 0
     draws  = 0
     win_rates = []
+    best_win_rate = float("-inf")
 
     print("Training started...\n")
 
@@ -198,9 +217,14 @@ def train(episodes=100000):
                   f"Draws: {draws:>3} | "
                   f"Win Rate: {win_rate:.1f}% | "
                   f"Epsilon: {agent.epsilon:.3f}")
+
+            if win_rate >= best_win_rate:
+                best_win_rate = win_rate
+                save_checkpoint(BEST_CHECKPOINT, agent.model)
+
             wins = losses = draws = 0  
 
-    print("\nTraining complete.")
+    print("\nTraining complete.", flush=True)
 
     plt.figure(figsize=(10, 5))
     plt.plot(win_rates)
@@ -209,9 +233,17 @@ def train(episodes=100000):
     plt.ylabel("Win Rate (%)")
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig("win_rate.png")  # saves a chart as an image
-    plt.show()
-    print("Win rate chart saved as win_rate.png")
+    plot_path = ARTIFACT_DIR / "win_rate.png"
+    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    plt.savefig(plot_path)  # saves a chart as an image
+    plt.close()
+    print(f"Win rate chart saved to {plot_path}")
+
+    if best_win_rate == float("-inf"):
+        save_checkpoint(BEST_CHECKPOINT, agent.model)
+
+    print(f"Best model saved to {BEST_CHECKPOINT}")
+
 
     return agent
 

@@ -1,3 +1,6 @@
 /venv
 __pycache__/
 *.pyc
+artifacts/
+win_rate.png
+dqn_model.pth

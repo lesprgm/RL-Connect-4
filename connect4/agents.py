@@ -3,9 +3,20 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
+import importlib.util
+from pathlib import Path
 from typing import List
 
+import numpy as np
+import torch
+
 from .game import ConnectFourGame, other_player, score_position
+
+
+ROWS = 6
+COLUMNS = 7
+ROOT = Path(__file__).resolve().parent.parent
+RL_AGENT_PATH = ROOT / "agent" / "r-learning" / "agent.py"
 
 
 DEFAULT_WEIGHTS = {
@@ -17,6 +28,69 @@ DEFAULT_WEIGHTS = {
     "block_two": 25,
     "center": 6,
 }
+
+
+def _load_rl_agent_module():
+    spec = importlib.util.spec_from_file_location("rl_agent_module", RL_AGENT_PATH)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load RL agent module from {RL_AGENT_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_rl_agent_module = _load_rl_agent_module()
+DQN = _rl_agent_module.DQN
+
+
+def encode_board(board: List[List[int]], agent_piece: int, opponent_piece: int) -> np.ndarray:
+    encoded = np.zeros((ROWS, COLUMNS), dtype=np.float32)
+    for row in range(ROWS):
+        for column in range(COLUMNS):
+            cell = board[row][column]
+            if cell == agent_piece:
+                encoded[row][column] = 1.0
+            elif cell == opponent_piece:
+                encoded[row][column] = 2.0
+    return encoded.reshape(-1)
+
+
+def choose_best_move(
+    model: DQN,
+    board: List[List[int]],
+    valid_columns: List[int],
+    agent_piece: int,
+    opponent_piece: int,
+) -> int:
+    state_tensor = torch.from_numpy(
+        encode_board(board, agent_piece=agent_piece, opponent_piece=opponent_piece)
+    ).unsqueeze(0)
+    with torch.no_grad():
+        q_values = model(state_tensor).squeeze(0).detach().cpu().numpy()
+    masked = np.full(COLUMNS, -1e9, dtype=np.float32)
+    for column in valid_columns:
+        masked[column] = q_values[column]
+    return int(np.argmax(masked))
+
+
+def load_checkpoint(checkpoint_path: Path | str) -> DQN:
+    path = Path(checkpoint_path)
+    if not path.exists():
+        raise FileNotFoundError(f"RL checkpoint not found: {path}")
+
+    payload = torch.load(path, map_location="cpu")
+    if not isinstance(payload, dict) or "model_state_dict" not in payload:
+        raise ValueError(f"Unsupported RL checkpoint format: {path}")
+
+    model = DQN()
+    model.load_state_dict(payload["model_state_dict"])
+    return model
+
+
+def save_checkpoint(checkpoint_path: Path | str, model: DQN) -> None:
+    path = Path(checkpoint_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"model_state_dict": model.state_dict()}, path)
 
 
 class BaseAgent:
@@ -58,36 +132,24 @@ class GeneticAlgorithmAgent(BaseAgent):
 @dataclass
 class SemiRandomRLAgent(BaseAgent):
     name = "semi_random_rl"
-    epsilon: float = 0.25
-    seed: int = 21
+    checkpoint_path: Path | None = None
 
     def __post_init__(self) -> None:
-        self.rng = random.Random(self.seed)
-        self.weights = {
-            "four": 100000,
-            "block_four": 90000,
-            "three": 115,
-            "two": 16,
-            "block_three": 135,
-            "block_two": 20,
-            "center": 5,
-        }
+        if self.checkpoint_path is None:
+            self.checkpoint_path = Path(__file__).resolve().parent.parent / "artifacts" / "rl" / "best_dqn.pth"
+        self.model = load_checkpoint(self.checkpoint_path)
 
     def choose_move(self, game: ConnectFourGame, player: int) -> int:
         moves = self._valid_moves(game)
         if len(moves) == 1:
             return moves[0]
-        if self.rng.random() < self.epsilon:
-            return self.rng.choice(moves)
-
-        scored_moves = []
-        for column in moves:
-            candidate = game.clone()
-            candidate.drop_piece(column)
-            value = score_position(candidate, player, self.weights)
-            scored_moves.append((value, column))
-        scored_moves.sort(reverse=True)
-        return scored_moves[0][1]
+        return choose_best_move(
+            self.model,
+            game.board,
+            moves,
+            agent_piece=player,
+            opponent_piece=other_player(player),
+        )
 
 
 @dataclass

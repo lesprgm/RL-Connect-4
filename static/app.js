@@ -2,6 +2,7 @@ const modeSelect = document.getElementById("mode-select");
 const newGameButton = document.getElementById("new-game-button");
 const modeDescription = document.getElementById("mode-description");
 const statusText = document.getElementById("status-text");
+const modeText = document.getElementById("mode-text");
 const sessionText = document.getElementById("session-text");
 const boardEl = document.getElementById("board");
 const columnButtonsEl = document.getElementById("column-buttons");
@@ -58,6 +59,7 @@ function renderBoard(state) {
 function renderState(state) {
   gameState = state;
   statusText.textContent = describeStatus(state);
+  modeText.textContent = state ? state.active_mode_label : "Not started";
   sessionText.textContent = state ? state.session_id.slice(0, 8) : "Not started";
   renderBoard(state);
 }

@@ -8,24 +8,22 @@ from collections import deque
 class DQN(nn.Module):
     def __init__(self):
         super(DQN,self).__init__()
-        
-        #Flatten a single row of 42 numbers and feed it into the network(6*7)
+
+        #Flatten 6x7 board into 42 inputs and predict 7 column scores.
         self.network = nn.Sequential(
             nn.Linear(42, 128),
-            nn.RelU(),
+            nn.ReLU(),
             nn.Linear(128, 128),
             nn.ReLU(),
-            nn.Linear(128,7) # 128 to 7 outputs(one q value per column)
+            nn.Linear(128,7)
         )
-        
+
     def forward(self, x):
-        #x is the board state, that passes through the network and returns 7 Q-values
         return self.network(x)
-    
 
 #replay memory, where each experience is (state,action,reward, next_state, done)
 class ReplayMemory:
-    def __int__(self, capacity=10000):
+    def __init__(self, capacity=10000):
         #remove old memories once you hit capacity(we store moves and deque moves once cap is hit)
         self.memory=deque(maxlen=capacity)
         
@@ -46,14 +44,14 @@ class ReplayMemory:
 class Agent:
     def __init__(self):
         self.model = DQN() #the brain
-        self.memeory =ReplayMemory() #experience storage
+        self.memory =ReplayMemory() #experience storage
         self.optimizer = optim.Adam(self.model.parameters(),lr=0.001)
         self.loss_fn = nn.MSELoss() #measure how wrong we are
         
         #Epsilon control exploration vs exploitation, so high is random and low is the agent exploiting
         self.epsilon = 1.0 #we start fully random
         self.epsilon_min = 0.05 #never go below 5% random
-        self.epsilon_decay = 0.995 # slowly reduce randomness each episode
+        self.epsilon_decay = 0.998 # slowly reduce randomness each episode
         self.gamma = 0.95 #how much future reqrds matter(0=none, 1=fully)
         self.batch_size = 64
         

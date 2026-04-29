@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict
 from wsgiref.simple_server import make_server
 
-from .agents import build_agent
+from .agents import BaseAgent, build_agent
 from .game import ConnectFourGame, PLAYER_ONE, PLAYER_TWO
 
 
@@ -33,7 +33,7 @@ MODES = [
     {
         "id": "human_vs_semi_random_rl",
         "label": "Human vs Semi-Random RL Agent",
-        "description": "Faces an epsilon-greedy RL-inspired opponent.",
+        "description": "Faces the persisted best RL checkpoint.",
     },
 ]
 
@@ -42,6 +42,7 @@ MODES = [
 class GameSession:
     mode: str
     game: ConnectFourGame
+    agent: BaseAgent | None = None
 
 
 SESSIONS: Dict[str, GameSession] = {}
@@ -79,8 +80,11 @@ def get_request_json(environ: dict) -> dict:
 
 
 def session_payload(session_id: str, session: GameSession) -> dict:
+    mode = next(item for item in MODES if item["id"] == session.mode)
     payload = session.game.to_dict(session.mode)
     payload["session_id"] = session_id
+    payload["active_mode_id"] = mode["id"]
+    payload["active_mode_label"] = mode["label"]
     payload["players"] = {
         "1": "human",
         "2": "human" if session.mode == "human_vs_human" else "agent",
@@ -93,7 +97,7 @@ def maybe_make_agent_move(session: GameSession) -> None:
         return
     if session.game.current_player != PLAYER_TWO:
         return
-    agent = build_agent(session.mode)
+    agent = session.agent
     if agent is None:
         return
     move = agent.choose_move(session.game.clone(), PLAYER_TWO)
@@ -106,7 +110,7 @@ def handle_create_game(data: dict) -> tuple[str, list[tuple[str, str]], bytes]:
     if mode not in valid_modes:
         return bad_request("Unsupported mode.")
     session_id = uuid.uuid4().hex
-    session = GameSession(mode=mode, game=ConnectFourGame())
+    session = GameSession(mode=mode, game=ConnectFourGame(), agent=build_agent(mode))
     SESSIONS[session_id] = session
     return json_response("201 Created", session_payload(session_id, session))
 
