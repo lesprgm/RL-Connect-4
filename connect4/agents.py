@@ -17,6 +17,8 @@ ROWS = 6
 COLUMNS = 7
 ROOT = Path(__file__).resolve().parent.parent
 RL_AGENT_PATH = ROOT / "agent" / "r-learning" / "agent.py"
+Self_Play_Model_PATH = ROOT / "agent" / "self-play" / "neuralNetwork.py"
+Self_Play_Weight_PATH = ROOT / "agent" / "self-play" / "connect4_policy_model.pth"
 
 
 DEFAULT_WEIGHTS = {
@@ -38,9 +40,20 @@ def _load_rl_agent_module():
     spec.loader.exec_module(module)
     return module
 
+def _load_self_play_model():
+    spec = importlib.util.spec_from_file_location("self_play_model_module", Self_Play_Model_PATH)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load self-play model module from {Self_Play_Model_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
 
 _rl_agent_module = _load_rl_agent_module()
 DQN = _rl_agent_module.DQN
+
+_self_play_model_module = _load_self_play_model()
+connect4SelfPlayModel = _self_play_model_module.connect4SelfPlayModel
 
 
 def encode_board(board: List[List[int]], agent_piece: int, opponent_piece: int) -> np.ndarray:
@@ -73,19 +86,18 @@ def choose_best_move(
     return int(np.argmax(masked))
 
 
-def load_checkpoint(checkpoint_path: Path | str) -> DQN:
+def load_checkpoint(checkpoint_path: Path | str, model_class) -> torch.nn.Module:
     path = Path(checkpoint_path)
     if not path.exists():
-        raise FileNotFoundError(f"RL checkpoint not found: {path}")
+        raise FileNotFoundError(f"Checkpoint not found: {path}")
 
     payload = torch.load(path, map_location="cpu")
-    if not isinstance(payload, dict) or "model_state_dict" not in payload:
-        raise ValueError(f"Unsupported RL checkpoint format: {path}")
+    state_dict = payload.get("model_state_dict", payload) if isinstance(payload, dict) else payload
 
-    model = DQN()
-    model.load_state_dict(payload["model_state_dict"])
+    model = model_class()
+    model.load_state_dict(state_dict)
+    model.eval()
     return model
-
 
 def save_checkpoint(checkpoint_path: Path | str, model: DQN) -> None:
     path = Path(checkpoint_path)
@@ -137,7 +149,7 @@ class SemiRandomRLAgent(BaseAgent):
     def __post_init__(self) -> None:
         if self.checkpoint_path is None:
             self.checkpoint_path = Path(__file__).resolve().parent.parent / "artifacts" / "rl" / "best_dqn.pth"
-        self.model = load_checkpoint(self.checkpoint_path)
+        self.model = load_checkpoint(self.checkpoint_path, DQN)
 
     def choose_move(self, game: ConnectFourGame, player: int) -> int:
         moves = self._valid_moves(game)
@@ -155,76 +167,24 @@ class SemiRandomRLAgent(BaseAgent):
 @dataclass
 class SelfPlayAgent(BaseAgent):
     name = "self_play"
-    depth: int = 4
+    checkpoint_path: Path | None = None
 
     def __post_init__(self) -> None:
-        self.weights = {
-            "four": 100000,
-            "block_four": 100000,
-            "three": 180,
-            "two": 32,
-            "block_three": 200,
-            "block_two": 36,
-            "center": 8,
-        }
+        if self.checkpoint_path is None:
+            self.checkpoint_path = Self_Play_Weight_PATH
+        self.model = load_checkpoint(self.checkpoint_path, connect4SelfPlayModel)
 
     def choose_move(self, game: ConnectFourGame, player: int) -> int:
-        score, move = self._minimax(game, self.depth, -math.inf, math.inf, True, player)
-        if move is None:
-            return self._valid_moves(game)[0]
-        return move
-
-    def _minimax(
-        self,
-        game: ConnectFourGame,
-        depth: int,
-        alpha: float,
-        beta: float,
-        maximizing: bool,
-        player: int,
-    ) -> tuple[float, int | None]:
-        moves = game.available_columns()
-        opponent = other_player(player)
-
-        if game.winner == player:
-            return 1_000_000 + depth, None
-        if game.winner == opponent:
-            return -1_000_000 - depth, None
-        if game.is_draw:
-            return 0, None
-        if depth == 0:
-            return score_position(game, player, self.weights), None
-
-        ordered_moves = sorted(moves, key=lambda move: abs(3 - move))
-        if maximizing:
-            best_value = -math.inf
-            best_move = ordered_moves[0]
-            for move in ordered_moves:
-                candidate = game.clone()
-                candidate.drop_piece(move)
-                value, _ = self._minimax(candidate, depth - 1, alpha, beta, False, player)
-                if value > best_value:
-                    best_value = value
-                    best_move = move
-                alpha = max(alpha, best_value)
-                if alpha >= beta:
-                    break
-            return best_value, best_move
-
-        best_value = math.inf
-        best_move = ordered_moves[0]
-        for move in ordered_moves:
-            candidate = game.clone()
-            candidate.drop_piece(move)
-            value, _ = self._minimax(candidate, depth - 1, alpha, beta, True, player)
-            if value < best_value:
-                best_value = value
-                best_move = move
-            beta = min(beta, best_value)
-            if alpha >= beta:
-                break
-        return best_value, best_move
-
+        moves = self._valid_moves(game)
+        if len(moves) == 1:
+            return moves[0]
+        return choose_best_move(
+            self.model,
+            game.board,
+            moves,
+            agent_piece=player,
+            opponent_piece=other_player(player),
+        )
 
 def build_agent(mode: str) -> BaseAgent | None:
     if mode == "human_vs_human":
