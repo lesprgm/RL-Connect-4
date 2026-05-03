@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import math
-import random
 from dataclasses import dataclass
 import importlib.util
 from pathlib import Path
@@ -10,7 +8,7 @@ from typing import List
 import numpy as np
 import torch
 
-from .game import ConnectFourGame, other_player, score_position
+from .game import ConnectFourGame, other_player
 
 
 ROWS = 6
@@ -80,8 +78,12 @@ def encode_board(board: List[List[int]], agent_piece: int, opponent_piece: int) 
     return encoded.reshape(-1)
 
 
+def flatten_board_raw(board: List[List[int]]) -> np.ndarray:
+    return np.array([cell for row in board for cell in row], dtype=np.float32)
+
+
 def choose_best_move(
-    model: DQN,
+    model: torch.nn.Module,
     board: List[List[int]],
     valid_columns: List[int],
     agent_piece: int,
@@ -90,6 +92,20 @@ def choose_best_move(
     state_tensor = torch.from_numpy(
         encode_board(board, agent_piece=agent_piece, opponent_piece=opponent_piece)
     ).unsqueeze(0)
+    with torch.no_grad():
+        q_values = model(state_tensor).squeeze(0).detach().cpu().numpy()
+    masked = np.full(COLUMNS, -1e9, dtype=np.float32)
+    for column in valid_columns:
+        masked[column] = q_values[column]
+    return int(np.argmax(masked))
+
+
+def choose_best_move_raw(
+    model: torch.nn.Module,
+    board: List[List[int]],
+    valid_columns: List[int],
+) -> int:
+    state_tensor = torch.from_numpy(flatten_board_raw(board)).unsqueeze(0)
     with torch.no_grad():
         q_values = model(state_tensor).squeeze(0).detach().cpu().numpy()
     masked = np.full(COLUMNS, -1e9, dtype=np.float32)
@@ -125,32 +141,6 @@ class BaseAgent:
 
     def _valid_moves(self, game: ConnectFourGame) -> List[int]:
         return game.available_columns()
-
-
-@dataclass
-class GeneticAlgorithmAgent(BaseAgent):
-    name = "genetic_algorithm"
-    seed: int = 7
-
-    def __post_init__(self) -> None:
-        rng = random.Random(self.seed)
-        self.weights = DEFAULT_WEIGHTS.copy()
-        self.weights["three"] += rng.randint(-15, 20)
-        self.weights["two"] += rng.randint(-3, 5)
-        self.weights["block_three"] += rng.randint(-10, 10)
-        self.weights["center"] += rng.randint(0, 4)
-
-    def choose_move(self, game: ConnectFourGame, player: int) -> int:
-        best_score = -math.inf
-        best_move = self._valid_moves(game)[0]
-        for column in self._valid_moves(game):
-            candidate = game.clone()
-            candidate.drop_piece(column)
-            score = score_position(candidate, player, self.weights)
-            if score > best_score:
-                best_score = score
-                best_move = column
-        return best_move
 
 
 @dataclass
@@ -226,8 +216,6 @@ class SelfPlayAgent(BaseAgent):
 def build_agent(mode: str) -> BaseAgent | None:
     if mode == "human_vs_human":
         return None
-    if mode == "human_vs_genetic_algorithm":
-        return GeneticAlgorithmAgent()
     if mode == "human_vs_self_play":
         return SelfPlayAgent()
     if mode == "human_vs_semi_random_rl":

@@ -1,9 +1,8 @@
 # RL-Connect-4
 
-A lightweight Connect Four web app with four playable modes:
+A lightweight Connect Four web app with three playable modes:
 
 - `human_vs_human`
-- `human_vs_genetic_algorithm`
 - `human_vs_self_play`
 - `human_vs_semi_random_rl`
 

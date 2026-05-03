@@ -21,11 +21,6 @@ MODES = [
         "description": "Local two-player mode on the same board.",
     },
     {
-        "id": "human_vs_genetic_algorithm",
-        "label": "Human vs Genetic Algorithm Agent",
-        "description": "Faces a weighted search agent with evolved-style scoring.",
-    },
-    {
         "id": "human_vs_self_play",
         "label": "Human vs Self-Play Agent",
         "description": "Faces the strongest agent, powered by minimax-style lookahead.",
