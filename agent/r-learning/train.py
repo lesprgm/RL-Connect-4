@@ -178,8 +178,12 @@ def play_episode(agent):
         # next_state is the board AFTER the opponent moved
         agent.store(state, action, reward=mid_game_reward(board), next_state=board.copy(), done=0)
 
-    # Learn from a random batch of past experiences
-    agent.learn()
+    # Learn from multiple random batches of past experiences
+    # doing several gradient steps per episode means the agent actually learns
+    # from most of its stored experiences instead of just one batch
+    learn_steps = min(2, max(1, len(agent.memory) // agent.batch_size))
+    for _ in range(learn_steps):
+        agent.learn()
 
     return result
 
@@ -221,6 +225,10 @@ def train(episodes=100000):
             if win_rate >= best_win_rate:
                 best_win_rate = win_rate
                 save_checkpoint(BEST_CHECKPOINT, agent.model)
+
+            #copy the current model into the target model every 500 episodes
+            #this keeps the target stationary during each window so learning stays stable
+            agent.update_target()
 
             wins = losses = draws = 0  
 

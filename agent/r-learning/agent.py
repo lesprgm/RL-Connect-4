@@ -23,7 +23,7 @@ class DQN(nn.Module):
 
 #replay memory, where each experience is (state,action,reward, next_state, done)
 class ReplayMemory:
-    def __init__(self, capacity=10000):
+    def __init__(self, capacity=100000):
         #remove old memories once you hit capacity(we store moves and deque moves once cap is hit)
         self.memory=deque(maxlen=capacity)
         
@@ -44,6 +44,8 @@ class ReplayMemory:
 class Agent:
     def __init__(self):
         self.model = DQN() #the brain
+        self.target_model = DQN() #a frozen copy of the brain used to compute stable target scores
+        self.target_model.load_state_dict(self.model.state_dict()) #copy initial weights so both start identical
         self.memory =ReplayMemory() #experience storage
         self.optimizer = optim.Adam(self.model.parameters(),lr=0.001)
         self.loss_fn = nn.MSELoss() #measure how wrong we are
@@ -51,7 +53,7 @@ class Agent:
         #Epsilon control exploration vs exploitation, so high is random and low is the agent exploiting
         self.epsilon = 1.0 #we start fully random
         self.epsilon_min = 0.05 #never go below 5% random
-        self.epsilon_decay = 0.998 # slowly reduce randomness each episode
+        self.epsilon_decay = 0.995 # slowly reduce randomness each episode
         self.gamma = 0.95 #how much future reqrds matter(0=none, 1=fully)
         self.batch_size = 64
         
@@ -75,6 +77,10 @@ class Agent:
     
     def store(self,state,action,reward, next_state, done):
         self.memory.push(state,action,reward, next_state, done)
+    
+    #copy the main model's weights into the target model so the target is updated to match the current policy
+    def update_target(self):
+        self.target_model.load_state_dict(self.model.state_dict())
         
     def learn(self):
         #dont learn until we have enough experiences to sample from
@@ -96,7 +102,9 @@ class Agent:
         # .gather() plucks out the Q-value for the action actually taken
         current_q = self.model(states).gather(1, actions.unsqueeze(1)).squeeze()
         
-        max_next_q = self.model(next_states).max(1)[0]
+        #use the frozen target model to compute the next state's best Q-value
+        #this keeps the target stable so the network isnt chasing a moving target
+        max_next_q = self.target_model(next_states).max(1)[0]
         target_q = rewards + self.gamma * max_next_q * (1-dones)
         
          # Calculate how wrong we were and update the network
