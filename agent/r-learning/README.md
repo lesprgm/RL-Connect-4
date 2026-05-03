@@ -27,8 +27,8 @@ python3 agent/r-learning/train.py
 
 Default: 50,000 episodes. Prints progress every 500 episodes and saves:
 
-- artifacts/rl/best_dqn.pth — checkpoint with the best win rate
-- artifacts/rl/win_rate.png — win rate plot over training
+- agent/r-learning/best_dqn.pth — checkpoint with the best win rate
+- agent/r-learning/win_rate.png — win rate plot over training
 
 ## Playing Against the Agent
 

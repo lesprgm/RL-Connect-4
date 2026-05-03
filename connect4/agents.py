@@ -150,7 +150,7 @@ class SemiRandomRLAgent(BaseAgent):
 
     def __post_init__(self) -> None:
         if self.checkpoint_path is None:
-            self.checkpoint_path = Path(__file__).resolve().parent.parent / "artifacts" / "rl" / "best_dqn.pth"
+            self.checkpoint_path = Path(__file__).resolve().parent.parent / "agent" / "r-learning" / "best_dqn.pth"
         self.model = load_checkpoint(self.checkpoint_path, DQN)
 
     def choose_move(self, game: ConnectFourGame, player: int) -> int:

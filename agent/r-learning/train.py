@@ -18,7 +18,7 @@ from agent import Agent
 from connect4.agents import save_checkpoint
 
 
-ARTIFACT_DIR = ROOT / "artifacts" / "rl"
+ARTIFACT_DIR = ROOT / "agent" / "r-learning"
 BEST_CHECKPOINT = ARTIFACT_DIR / "best_dqn.pth"
 
 # SEMI-RANDOM OPPONENT

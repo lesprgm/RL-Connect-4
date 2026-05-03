@@ -6,7 +6,7 @@ A lightweight Connect Four web app with three playable modes:
 - `human_vs_self_play`
 - `human_vs_semi_random_rl`
 
-The RL mode loads the best saved checkpoint from `artifacts/rl/best_dqn.pth`.
+The semi-random agent loads the best saved checkpoint from `agent/r-learning/best_dqn.pth`.
 
 ## Run
 
@@ -16,7 +16,7 @@ python3 run.py
 
 Then open `http://127.0.0.1:8000`.
 
-## Train the RL agent
+## Train the semi-random agent
 
 ```bash
 python3 agent/r-learning/train.py
@@ -24,8 +24,8 @@ python3 agent/r-learning/train.py
 
 That script now saves:
 
-- `artifacts/rl/best_dqn.pth`
-- `artifacts/rl/win_rate.png`
+- `agent/r-learning/best_dqn.pth`
+- `agent/r-learning/win_rate.png`
 
 ## API
 
