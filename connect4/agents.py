@@ -31,6 +31,18 @@ DEFAULT_WEIGHTS = {
     "center": 6,
 }
 
+def encode_board_for_player(board: List[List[int]], current_player: int) -> np.ndarray:
+    encoded = []
+    for row in board:
+        for cell in row:
+            if cell == 0:
+                encoded.append(0.0)
+            elif cell == current_player:
+                encoded.append(1.0)
+            else:
+                encoded.append(2.0)
+    return np.array(encoded, dtype=np.float32)
+
 
 def _load_rl_agent_module():
     spec = importlib.util.spec_from_file_location("rl_agent_module", RL_AGENT_PATH)
@@ -174,17 +186,42 @@ class SelfPlayAgent(BaseAgent):
             self.checkpoint_path = Self_Play_Weight_PATH
         self.model = load_checkpoint(self.checkpoint_path, connect4SelfPlayModel)
 
+    def choose_best_self_play_move(
+        self,
+        model: torch.nn.Module,
+        board: List[List[int]],
+        valid_columns: List[int],
+        player: int,
+    ) -> int:
+        state_tensor = torch.from_numpy(
+            encode_board_for_player(board, player)
+        ).unsqueeze(0)
+
+        with torch.no_grad():
+            q_values = model(state_tensor).squeeze(0).detach().cpu().numpy()
+
+        masked = np.full(COLUMNS, -1e9, dtype=np.float32)
+
+        for column in valid_columns:
+            masked[column] = q_values[column]
+
+        return int(np.argmax(masked))
+
     def choose_move(self, game: ConnectFourGame, player: int) -> int:
         moves = self._valid_moves(game)
+
         if len(moves) == 1:
             return moves[0]
-        return choose_best_move(
+
+        # This model was trained with current-player perspective:
+        # empty = 0, current player = 1, opponent = 2
+        return self.choose_best_self_play_move(
             self.model,
             game.board,
             moves,
-            agent_piece=player,
-            opponent_piece=other_player(player),
+            player,
         )
+
 
 def build_agent(mode: str) -> BaseAgent | None:
     if mode == "human_vs_human":
