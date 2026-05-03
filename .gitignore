@@ -1,6 +1,6 @@
 /venv
 __pycache__/
 *.pyc
-artifacts/
-win_rate.png
+agent/r-learning/best_dqn.pth
+agent/r-learning/win_rate.png
 dqn_model.pth
