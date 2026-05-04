@@ -114,6 +114,29 @@ def choose_best_move_raw(
     return int(np.argmax(masked))
 
 
+# Helper to check for immediate win or block situations
+def find_tactical_move(game: ConnectFourGame, player: int, valid_columns: List[int]) -> int | None:
+    opponent = other_player(player)
+
+    # 1. If the self-play agent can win immediately, take that move.
+    for column in valid_columns:
+        candidate = game.clone()
+        candidate.current_player = player
+        candidate.drop_piece(column)
+        if candidate.is_over() and candidate.winner == player:
+            return column
+
+    # 2. If the opponent can win immediately, block that move.
+    for column in valid_columns:
+        candidate = game.clone()
+        candidate.current_player = opponent
+        candidate.drop_piece(column)
+        if candidate.is_over() and candidate.winner == opponent:
+            return column
+
+    return None
+
+
 def load_checkpoint(checkpoint_path: Path | str, model_class) -> torch.nn.Module:
     path = Path(checkpoint_path)
     if not path.exists():
@@ -202,6 +225,10 @@ class SelfPlayAgent(BaseAgent):
 
         if len(moves) == 1:
             return moves[0]
+
+        tactical_move = find_tactical_move(game, player, moves)
+        if tactical_move is not None:
+            return tactical_move
 
         # This model was trained with current-player perspective:
         # empty = 0, current player = 1, opponent = 2

@@ -40,9 +40,10 @@ opponent_model.eval()
 #Initialized buffer with a maximum size of 10,000 transitions
 replay_buffer = replayBuffer.ReplayBuffer(100000)
 
-#An optimizer and loss function for training the policy model from Torch
+#An optimizer and loss functions for training the policy model from Torch
 optimizer = optim.Adam(policy_model.parameters(), lr=0.0002)
 criterion = nn.MSELoss()
+tactical_criterion = nn.CrossEntropyLoss()
 
 #Epsilon-greedy parameters
 epsilonStart = 1.0
@@ -291,6 +292,114 @@ def evaluate_tactical_accuracy(model):
     model.train()
     return correct / total if total > 0 else 0.0, correct, total
 
+
+# --- Direct tactical supervised training helpers ---
+def generate_tactical_training_examples():
+    examples = []
+
+    for current_player in [1, 2]:
+        opponent = game.other_player(current_player)
+
+        # Vertical immediate wins and blocks.
+        for column in range(7):
+            board = [[0 for _ in range(7)] for _ in range(6)]
+            board[5][column] = current_player
+            board[4][column] = current_player
+            board[3][column] = current_player
+            examples.append((get_State(board, current_player), column))
+
+            board = [[0 for _ in range(7)] for _ in range(6)]
+            board[5][column] = opponent
+            board[4][column] = opponent
+            board[3][column] = opponent
+            examples.append((get_State(board, current_player), column))
+
+        # Horizontal immediate wins and blocks on the bottom row.
+        for start_col in range(4):
+            # Pattern: XXX_, play at the right end.
+            target_column = start_col + 3
+
+            board = [[0 for _ in range(7)] for _ in range(6)]
+            board[5][start_col] = current_player
+            board[5][start_col + 1] = current_player
+            board[5][start_col + 2] = current_player
+            examples.append((get_State(board, current_player), target_column))
+
+            board = [[0 for _ in range(7)] for _ in range(6)]
+            board[5][start_col] = opponent
+            board[5][start_col + 1] = opponent
+            board[5][start_col + 2] = opponent
+            examples.append((get_State(board, current_player), target_column))
+
+            # Pattern: _XXX, play at the left end.
+            target_column = start_col
+
+            board = [[0 for _ in range(7)] for _ in range(6)]
+            board[5][start_col + 1] = current_player
+            board[5][start_col + 2] = current_player
+            board[5][start_col + 3] = current_player
+            examples.append((get_State(board, current_player), target_column))
+
+            board = [[0 for _ in range(7)] for _ in range(6)]
+            board[5][start_col + 1] = opponent
+            board[5][start_col + 2] = opponent
+            board[5][start_col + 3] = opponent
+            examples.append((get_State(board, current_player), target_column))
+
+            # Pattern: XX_X, play in the gap.
+            target_column = start_col + 2
+
+            board = [[0 for _ in range(7)] for _ in range(6)]
+            board[5][start_col] = current_player
+            board[5][start_col + 1] = current_player
+            board[5][start_col + 3] = current_player
+            examples.append((get_State(board, current_player), target_column))
+
+            board = [[0 for _ in range(7)] for _ in range(6)]
+            board[5][start_col] = opponent
+            board[5][start_col + 1] = opponent
+            board[5][start_col + 3] = opponent
+            examples.append((get_State(board, current_player), target_column))
+
+            # Pattern: X_XX, play in the gap.
+            target_column = start_col + 1
+
+            board = [[0 for _ in range(7)] for _ in range(6)]
+            board[5][start_col] = current_player
+            board[5][start_col + 2] = current_player
+            board[5][start_col + 3] = current_player
+            examples.append((get_State(board, current_player), target_column))
+
+            board = [[0 for _ in range(7)] for _ in range(6)]
+            board[5][start_col] = opponent
+            board[5][start_col + 2] = opponent
+            board[5][start_col + 3] = opponent
+            examples.append((get_State(board, current_player), target_column))
+
+    random.shuffle(examples)
+    return examples
+
+
+def train_on_tactical_examples(model, optimizer, loss_function, batch_size=64):
+    examples = generate_tactical_training_examples()
+    batch_size = min(batch_size, len(examples))
+    batch = examples[:batch_size]
+    states, target_columns = zip(*batch)
+
+    states_tensor = torch.FloatTensor(states)
+    target_columns_tensor = torch.LongTensor(target_columns)
+
+    q_values = model(states_tensor)
+    loss = loss_function(q_values, target_columns_tensor)
+
+    optimizer.zero_grad()
+    loss.backward()
+    nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    optimizer.step()
+
+    return loss.item()
+
+
 #Outer Game loop for multiple games
 numGames = 0
 best_win_rate = -1.0
@@ -304,6 +413,7 @@ for games in range(50000):
     env = game.ConnectFourGame()
     done = False
     current_loss = 0.0
+    current_tactical_loss = 0.0
 
     # Opponent mix:
     # 35% live self-play, 30% frozen older model, 25% tactical/blocking agent, 10% random agent.
@@ -434,6 +544,16 @@ for games in range(50000):
             current_loss = loss.item()
             nn.utils.clip_grad_norm_(policy_model.parameters(), 1.0)  # Gradient clipping
             optimizer.step()
+    # Direct tactical supervised training prevents the model from forgetting
+    # obvious win/block patterns while reinforcement learning continues.
+    if numGames % 5 == 0:
+        current_tactical_loss = train_on_tactical_examples(
+            policy_model,
+            optimizer,
+            tactical_criterion,
+            batch_size=64,
+        )
+
     #Decay epsilon after each game        
     epsilonStart *= epsilonDecay
     if epsilonStart < epsilonEnd:
@@ -492,6 +612,7 @@ for games in range(50000):
             "game": numGames,
             "epsilon": epsilonStart,
             "loss": latest_loss,
+            "tactical_loss": current_tactical_loss,
             "reward": reward,
             "current_win_rate": current_win_rate,
             "best_win_rate": best_win_rate,
@@ -504,7 +625,7 @@ for games in range(50000):
 
         print(
             f"Game: {numGames}, Opponent: {opponent_type}, Epsilon: {epsilonStart:.4f}, "
-            f"Loss: {latest_loss:.4f}, reward: {reward}, "
+            f"Loss: {latest_loss:.4f}, TacticalLoss: {current_tactical_loss:.4f}, reward: {reward}, "
             f"current_win_rate: {current_win_rate:.2f}, best_win_rate: {best_win_rate:.2f}, "
             f"tactical_accuracy: {current_tactical_accuracy:.2f}, combined_score: {current_combined_score:.2f}"
         )
@@ -526,6 +647,7 @@ else:
 if len(training_log) > 0:
     games = [row["game"] for row in training_log]
     losses = [row["loss"] for row in training_log]
+    tactical_losses = [row["tactical_loss"] for row in training_log]
     epsilons = [row["epsilon"] for row in training_log]
     rewards = [row["reward"] for row in training_log]
 
@@ -535,6 +657,14 @@ if len(training_log) > 0:
     plt.ylabel("Loss")
     plt.title("Self-Play Training Loss")
     plt.savefig("training_loss.png")
+    plt.close()
+
+    plt.figure()
+    plt.plot(games, tactical_losses)
+    plt.xlabel("Game")
+    plt.ylabel("Tactical Supervised Loss")
+    plt.title("Direct Tactical Training Loss")
+    plt.savefig("tactical_training_loss.png")
     plt.close()
 
     plt.figure()
