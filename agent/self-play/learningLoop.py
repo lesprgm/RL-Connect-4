@@ -16,9 +16,11 @@ def resolve_checkpoint_path():
 
 CHECKPOINT_PATH = resolve_checkpoint_path()
 
+import importlib.util
 import replayBuffer
 import neuralNetwork
 import random
+import numpy as np
 import torch
 import torch.optim as optim
 import torch.nn as nn
@@ -77,9 +79,25 @@ policy_model = neuralNetwork.connect4SelfPlayModel()
 target_model = neuralNetwork.connect4SelfPlayModel()
 #Frozen opponent model used to make self-play less unstable
 opponent_model = neuralNetwork.connect4SelfPlayModel()
-#Stable baseline used only for checkpoint evaluation. This keeps model saving based
-#on gameplay against a fixed RL opponent instead of only beating random moves.
-evaluation_opponent_model = neuralNetwork.connect4SelfPlayModel()
+
+#Semi-random DQN opponent — a separately trained RL agent that provides a stronger
+#challenge than random moves and pushes the self-play model to learn deeper strategy.
+_rl_agent_spec = importlib.util.spec_from_file_location(
+    "rl_agent_module",
+    os.path.join(PROJECT_ROOT, "agent", "r-learning", "agent.py"),
+)
+_rl_agent_module = importlib.util.module_from_spec(_rl_agent_spec)
+_rl_agent_spec.loader.exec_module(_rl_agent_module)
+semi_random_dqn = _rl_agent_module.DQN()
+semi_random_checkpoint = torch.load(
+    os.path.join(PROJECT_ROOT, "agent", "r-learning", "best_dqn.pth"),
+    map_location="cpu",
+)
+semi_random_dqn.load_state_dict(
+    semi_random_checkpoint.get("model_state_dict", semi_random_checkpoint)
+    if isinstance(semi_random_checkpoint, dict) else semi_random_checkpoint
+)
+semi_random_dqn.eval()
 
 loaded_existing_checkpoint = load_model_weights_if_available(policy_model, CHECKPOINT_PATH)
 if loaded_existing_checkpoint:
@@ -88,7 +106,6 @@ if loaded_existing_checkpoint:
 #Copy the weights from the policy model to the target model and opponent models
 copy_model_weights(policy_model, target_model)
 copy_model_weights(policy_model, opponent_model, eval_mode=True)
-copy_model_weights(policy_model, evaluation_opponent_model, eval_mode=True)
 
 #Initialized buffer with a maximum size of 10,000 transitions
 replay_buffer = replayBuffer.ReplayBuffer(100000)
@@ -99,8 +116,8 @@ criterion = nn.MSELoss()
 
 #Epsilon-greedy parameters
 epsilonStart = 1.0
-epsilonEnd = 0.05
-epsilonDecay = 0.9998
+epsilonEnd = 0.1
+epsilonDecay = 0.9999
 gamma = 0.95
 
 def get_State(board, current_player):
@@ -190,14 +207,30 @@ def choose_training_action(policy_model, env, current_player, state, epsilon):
 
 
 def choose_opponent_setup(game_index):
+    #40% live self-play, 30% semi-random DQN, 30% frozen older model.
+    #Alternating opponent_player ensures the policy model gets equal
+    #experience playing as P1 and P2 against non-self opponents.
     opponent_roll = random.random()
-    if opponent_roll < 0.45:
-        return "self", None
-
     opponent_player = 2 if game_index % 2 == 0 else 1
-    if opponent_roll < 0.80:
-        return "frozen", opponent_player
-    return "random", opponent_player
+
+    if opponent_roll < 0.40:
+        return "self", None
+    if opponent_roll < 0.70:
+        return "semi_random", opponent_player
+    return "frozen", opponent_player
+
+
+def choose_semi_random_action(env, current_player, valid_columns):
+    #The semi-random DQN uses the same encoding as the self-play model
+    #(agent=1, opponent=2), so we can reuse get_State directly.
+    state = get_State(env.board, current_player)
+    state_tensor = torch.FloatTensor(state).unsqueeze(0)
+    with torch.no_grad():
+        q_values = semi_random_dqn(state_tensor).squeeze(0).numpy()
+    masked = np.full(7, -1e9)
+    for col in valid_columns:
+        masked[col] = q_values[col]
+    return int(np.argmax(masked)), "semi_random_opponent"
 
 
 def choose_game_action(opponent_type, opponent_player, env, current_player, state, epsilon):
@@ -210,6 +243,10 @@ def choose_game_action(opponent_type, opponent_player, env, current_player, stat
             epsilon,
         )
         return action, action_reason, True
+
+    if opponent_type == "semi_random":
+        action, action_reason = choose_semi_random_action(env, current_player, env.available_columns())
+        return action, action_reason, False
 
     if opponent_type == "frozen":
         action, action_reason = choose_training_action(
@@ -224,9 +261,8 @@ def choose_game_action(opponent_type, opponent_player, env, current_player, stat
     return random.choice(env.available_columns()), "random_opponent", False
 
 
-def evaluate_checkpoint_candidate(model, baseline_opponent, games_to_play=100):
+def evaluate_checkpoint_candidate(model, dqn_opponent, games_to_play=100):
     model.eval()
-    baseline_opponent.eval()
 
     wins = 0
     losses = 0
@@ -242,7 +278,7 @@ def evaluate_checkpoint_candidate(model, baseline_opponent, games_to_play=100):
             if env.current_player == model_player:
                 action = choose_model_action(model, env.board, env.current_player, valid_columns)
             else:
-                action = choose_model_action(baseline_opponent, env.board, env.current_player, valid_columns)
+                action, _ = choose_semi_random_action(env, env.current_player, valid_columns)
 
             env.drop_piece(action)
 
@@ -255,7 +291,6 @@ def evaluate_checkpoint_candidate(model, baseline_opponent, games_to_play=100):
             losses += 1
 
     model.train()
-    baseline_opponent.eval()
     return {
         "score": (wins + 0.5 * draws) / games_to_play,
         "wins": wins,
@@ -284,7 +319,7 @@ def save_line_plot(plt, x_values, y_values, ylabel, title, filename):
     plt.close()
 
 #Outer Game loop for multiple games
-total_games = int(os.environ.get("SELF_PLAY_NUM_GAMES", "10000"))
+total_games = int(os.environ.get("SELF_PLAY_NUM_GAMES", "50000"))
 eval_start_game = int(os.environ.get("SELF_PLAY_EVAL_START_GAME", "3000"))
 eval_interval = int(os.environ.get("SELF_PLAY_EVAL_INTERVAL", "500"))
 eval_games = int(os.environ.get("SELF_PLAY_EVAL_GAMES", "100"))
@@ -299,7 +334,7 @@ for games in range(total_games):
     current_loss = 0.0
     pending_policy_transitions = {}
 
-    # 45% live self-play, 35% frozen older RL model, 20% random agent.
+    # 40% live self-play, 30% semi-random DQN, 30% frozen older model.
     opponent_type, opponent_player = choose_opponent_setup(games)
 
     #inner Move loop for a single game
@@ -354,14 +389,9 @@ for games in range(total_games):
             otherPlayerADScore = game.score_position(env, other_player, DEFAULT_WEIGHTS)
             Playerscore_diff = playerADScore - playerBDScore
             OtherPlayerScore_diff = otherPlayerADScore - otherPlayerBDScore
-            reward -= max(min(OtherPlayerScore_diff / 100000, 0.1), -0.1)
-            
-            reward += max(min(Playerscore_diff / 100000, 0.1), -0.1)
+        reward -= max(min(OtherPlayerScore_diff / 1000000, 0.01), -0.01)
 
-        # Reward shaping remains reinforcement learning because the model receives
-        # feedback after taking an action instead of being given a labeled answer.
-        if action_reason in ["model", "explore"]:
-            reward += 0.02
+        reward += max(min(Playerscore_diff / 1000000, 0.01), -0.01)
 
         if allowed_opponent_win:
             reward -= 1.5
@@ -386,38 +416,45 @@ for games in range(total_games):
                     old_state, old_action, old_reward, old_next_state, _ = pending_policy_transitions.pop(losing_player)
                     replay_buffer.add((old_state, old_action, old_reward - 1.0, old_next_state, True))
 
-        #Sample a batch of transitions from the replay buffer
-        if replay_buffer.size() >= 64:
-            batch = replay_buffer.sample(64)
-            states, actions, rewards, next_states, dones = zip(*batch)
+    #Learn once per game (not per move) to keep training fast and stable.
+    #Do 1-3 gradient steps depending on how much experience is available,
+    #matching the semi-random agent's learn-per-episode pattern.
+    learn_steps = min(5, max(1, replay_buffer.size() // 64))
+    for _ in range(learn_steps):
+        if replay_buffer.size() < 64:
+            break
+        batch = replay_buffer.sample(64)
+        states, actions, rewards, next_states, dones = zip(*batch)
 
-            states_tensor = torch.FloatTensor(states)
-            actions_tensor = torch.LongTensor(actions).unsqueeze(1)
-            rewards_tensor = torch.FloatTensor(rewards).unsqueeze(1)
-            next_states_tensor = torch.FloatTensor(next_states)
-            dones_tensor = torch.FloatTensor(dones).unsqueeze(1)
+        states_tensor = torch.FloatTensor(states)
+        actions_tensor = torch.LongTensor(actions).unsqueeze(1)
+        rewards_tensor = torch.FloatTensor(rewards).unsqueeze(1)
+        next_states_tensor = torch.FloatTensor(next_states)
+        dones_tensor = torch.FloatTensor(dones).unsqueeze(1)
 
-            #Compute current Q-values using the policy model
-            current_q_values = policy_model(states_tensor).gather(1, actions_tensor)
+        #Compute current Q-values using the policy model
+        current_q_values = policy_model(states_tensor).gather(1, actions_tensor)
 
-            #Compute target Q-values using the target model.
-            # In self-play, the next state is the opponent's turn, so the opponent's best value
-            # should be subtracted from the current player's value.
-            with torch.no_grad():
-                next_q_values = target_model(next_states_tensor)
-                next_q_values = mask_invalid_q_values(next_q_values, next_states_tensor, dones_tensor)
-                max_next_q_values, _ = torch.max(next_q_values, dim=1, keepdim=True)
-                target_q_values = rewards_tensor - (gamma * max_next_q_values * (1 - dones_tensor))
+        #Compute target Q-values using the target model.
+        # With player-relative encoding, the next-state Q-values are already from the
+        # next player's perspective (the opponent). The standard Bellman addition
+        # (reward + gamma * max_next_q) is correct because the encoding flip handles
+        # the zero-sum nature implicitly — subtraction would double-count the negation.
+        with torch.no_grad():
+            next_q_values = target_model(next_states_tensor)
+            next_q_values = mask_invalid_q_values(next_q_values, next_states_tensor, dones_tensor)
+            max_next_q_values, _ = torch.max(next_q_values, dim=1, keepdim=True)
+            target_q_values = rewards_tensor - (gamma * max_next_q_values * (1 - dones_tensor))
 
-            #Compute loss and update policy model
-            loss = criterion(current_q_values, target_q_values)
-            optimizer.zero_grad()
-            loss.backward()
-            current_loss = loss.item()
-            nn.utils.clip_grad_norm_(policy_model.parameters(), 1.0)  # Gradient clipping
-            optimizer.step()
+        #Compute loss and update policy model
+        loss = criterion(current_q_values, target_q_values)
+        optimizer.zero_grad()
+        loss.backward()
+        current_loss = loss.item()
+        nn.utils.clip_grad_norm_(policy_model.parameters(), 1.0) # Gradient clipping
+        optimizer.step()
 
-    #Decay epsilon after each game        
+    #Decay epsilon after each game
     epsilonStart *= epsilonDecay
     if epsilonStart < epsilonEnd:
         epsilonStart = epsilonEnd
@@ -425,7 +462,7 @@ for games in range(total_games):
     if numGames > eval_start_game and numGames % eval_interval == 0:
         eval_results = evaluate_checkpoint_candidate(
             policy_model,
-            evaluation_opponent_model,
+            semi_random_dqn,
             games_to_play=eval_games,
         )
         checkpoint_score = eval_results["score"]
