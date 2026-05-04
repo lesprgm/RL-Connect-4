@@ -12,6 +12,7 @@ import torch
 import torch.optim as optim
 import torch.nn as nn
 from connect4 import game
+import matplotlib.pyplot as plt
 
 
 DEFAULT_WEIGHTS = {
@@ -28,21 +29,25 @@ DEFAULT_WEIGHTS = {
 policy_model = neuralNetwork.connect4SelfPlayModel()
 #Older frozen model used for stable target value estimation
 target_model = neuralNetwork.connect4SelfPlayModel()
+#Frozen opponent model used to make self-play less unstable
+opponent_model = neuralNetwork.connect4SelfPlayModel()
 
-#Copy the weights from the policy model to the target model
+#Copy the weights from the policy model to the target model and opponent model
 target_model.load_state_dict(policy_model.state_dict())
+opponent_model.load_state_dict(policy_model.state_dict())
+opponent_model.eval()
 
 #Initialized buffer with a maximum size of 10,000 transitions
-replay_buffer = replayBuffer.ReplayBuffer(50000)
+replay_buffer = replayBuffer.ReplayBuffer(100000)
 
 #An optimizer and loss function for training the policy model from Torch
-optimizer = optim.Adam(policy_model.parameters(), lr=0.0005)
+optimizer = optim.Adam(policy_model.parameters(), lr=0.0002)
 criterion = nn.MSELoss()
 
 #Epsilon-greedy parameters
 epsilonStart = 1.0
-epsilonEnd = 0.01
-epsilonDecay = 0.999
+epsilonEnd = 0.05
+epsilonDecay = 0.9998
 
 def get_State(board, current_player):
     # Get board state from the current player's perspective:
@@ -96,6 +101,111 @@ def choose_model_action(model, board, current_player, valid_columns):
 
     return int(torch.argmax(masked_q_values).item())
 
+def find_immediate_win_or_block(env, current_player, valid_columns):
+    opponent = game.other_player(current_player)
+
+    # 1. If current player can win immediately, choose that move.
+    for column in valid_columns:
+        candidate = env.clone()
+        candidate.current_player = current_player
+        candidate.drop_piece(column)
+        if candidate.is_over() and candidate.winner == current_player:
+            return column, "win"
+
+    # 2. If opponent can win immediately, block that move.
+    for column in valid_columns:
+        candidate = env.clone()
+        candidate.current_player = opponent
+        candidate.drop_piece(column)
+        if candidate.is_over() and candidate.winner == opponent:
+            return column, "block"
+
+    return None, None
+
+
+def move_allows_opponent_win(env, current_player, column):
+    opponent = game.other_player(current_player)
+    candidate = env.clone()
+    candidate.current_player = current_player
+    candidate.drop_piece(column)
+
+    if candidate.is_over():
+        return False
+
+    opponent_moves = candidate.available_columns()
+    for opponent_column in opponent_moves:
+        opponent_candidate = candidate.clone()
+        opponent_candidate.current_player = opponent
+        opponent_candidate.drop_piece(opponent_column)
+        if opponent_candidate.is_over() and opponent_candidate.winner == opponent:
+            return True
+
+    return False
+
+
+def choose_training_action(policy_model, env, current_player, state, epsilon):
+    valid_columns = env.available_columns()
+
+    tactical_action, tactical_reason = find_immediate_win_or_block(
+        env,
+        current_player,
+        valid_columns,
+    )
+
+    # If there is a direct win or block, use it during training.
+    # This stores tactical examples in replay memory so the model learns them.
+    if tactical_action is not None:
+        return tactical_action, tactical_reason
+
+    safe_columns = []
+    for column in valid_columns:
+        if not move_allows_opponent_win(env, current_player, column):
+            safe_columns.append(column)
+
+    candidate_columns = safe_columns if len(safe_columns) > 0 else valid_columns
+
+    # Epsilon-greedy exploration, but prefer safe exploratory moves.
+    if random.random() < epsilon:
+        return random.choice(candidate_columns), "explore_safe"
+
+    state_tensor = torch.FloatTensor(state).unsqueeze(0)
+    with torch.no_grad():
+        q_values = policy_model(state_tensor).squeeze(0)
+
+    masked_q_values = torch.full((7,), float('-inf'))
+    for column in candidate_columns:
+        masked_q_values[column] = q_values[column]
+
+    return int(torch.argmax(masked_q_values).item()), "model_safe"
+
+
+# --- Tactical/blocking action selection for tactical agent ---
+def choose_tactical_blocking_action(env, current_player):
+    valid_columns = env.available_columns()
+
+    tactical_action, tactical_reason = find_immediate_win_or_block(
+        env,
+        current_player,
+        valid_columns,
+    )
+    if tactical_action is not None:
+        return tactical_action, f"tactical_{tactical_reason}"
+
+    safe_columns = []
+    for column in valid_columns:
+        if not move_allows_opponent_win(env, current_player, column):
+            safe_columns.append(column)
+
+    candidate_columns = safe_columns if len(safe_columns) > 0 else valid_columns
+
+    # Prefer center columns because they create more possible connect-four lines.
+    column_preference = [3, 2, 4, 1, 5, 0, 6]
+    for column in column_preference:
+        if column in candidate_columns:
+            return column, "tactical_center_safe"
+
+    return random.choice(candidate_columns), "tactical_random_safe"
+
 
 def evaluate_model_against_random(model, games_to_play=100):
     model.eval()
@@ -132,36 +242,121 @@ def evaluate_model_against_random(model, games_to_play=100):
     model.train()
     return wins / games_to_play, wins, losses, draws
 
+
+def evaluate_tactical_accuracy(model):
+    model.eval()
+    correct = 0
+    total = 0
+
+    test_columns = [0, 3, 6]
+
+    for current_player in [1, 2]:
+        opponent = game.other_player(current_player)
+
+        for column in test_columns:
+            # Test 1: model should take an immediate vertical win.
+            env = game.ConnectFourGame()
+            env.current_player = current_player
+            env.board[5][column] = current_player
+            env.board[4][column] = current_player
+            env.board[3][column] = current_player
+
+            prediction = choose_model_action(
+                model,
+                env.board,
+                current_player,
+                env.available_columns(),
+            )
+            if prediction == column:
+                correct += 1
+            total += 1
+
+            # Test 2: model should block opponent's immediate vertical win.
+            env = game.ConnectFourGame()
+            env.current_player = current_player
+            env.board[5][column] = opponent
+            env.board[4][column] = opponent
+            env.board[3][column] = opponent
+
+            prediction = choose_model_action(
+                model,
+                env.board,
+                current_player,
+                env.available_columns(),
+            )
+            if prediction == column:
+                correct += 1
+            total += 1
+
+    model.train()
+    return correct / total if total > 0 else 0.0, correct, total
+
 #Outer Game loop for multiple games
 numGames = 0
 best_win_rate = -1.0
-best_eval_score = -float("inf")
-for games in range(10000):
+current_win_rate = -1.0
+current_tactical_accuracy = -1.0
+current_combined_score = -1.0
+best_combined_score = -float("inf")
+training_log = []
+for games in range(50000):
     #Initialized game Environment
     env = game.ConnectFourGame()
     done = False
     current_loss = 0.0
+
+    # Opponent mix:
+    # 35% live self-play, 30% frozen older model, 25% tactical/blocking agent, 10% random agent.
+    opponent_roll = random.random()
+    if opponent_roll < 0.35:
+        opponent_type = "self"
+        opponent_player = None
+    elif opponent_roll < 0.65:
+        opponent_type = "frozen"
+        opponent_player = 2 if games % 2 == 0 else 1
+    elif opponent_roll < 0.90:
+        opponent_type = "tactical"
+        opponent_player = 2 if games % 2 == 0 else 1
+    else:
+        opponent_type = "random"
+        opponent_player = 2 if games % 2 == 0 else 1
 
     #inner Move loop for a single game
     while not done:
         # Save the player whose turn it is, then encode the board from that player's perspective.
         current_player = env.current_player
         state = get_State(env.board, current_player)
-        
-        #Picking an action(Column) using epsilon-greedy strategy
-        if random.random() < epsilonStart:
-            action = random.choice(env.available_columns())
+
+        # Pick an action based on the selected opponent mix.
+        # Only store replay transitions for moves chosen by the live policy model.
+        train_this_transition = True
+
+        if opponent_type == "self" or current_player != opponent_player:
+            action, action_reason = choose_training_action(
+                policy_model,
+                env,
+                current_player,
+                state,
+                epsilonStart,
+            )
+        elif opponent_type == "frozen":
+            train_this_transition = False
+            action, action_reason = choose_training_action(
+                opponent_model,
+                env,
+                current_player,
+                state,
+                0.0,
+            )
+        elif opponent_type == "tactical":
+            train_this_transition = False
+            action, action_reason = choose_tactical_blocking_action(env, current_player)
         else:
-            with torch.no_grad():
-                state_tensor = torch.FloatTensor(state).unsqueeze(0)  # Add batch dimension
-                q_values = policy_model(state_tensor)
-                #check if column is available
-                for col in range(q_values.shape[1]):
-                    if col not in env.available_columns():
-                        q_values[0][col] = float('-inf')  # Set Q-value to -inf for unavailable columns
-                action = torch.argmax(q_values).item()
-        
-        
+            train_this_transition = False
+            action = random.choice(env.available_columns())
+            action_reason = "random_opponent"
+
+        allowed_opponent_win = move_allows_opponent_win(env, current_player, action)
 
         #Save players, get players' scores and Take Action
         other_player = game.other_player(current_player)
@@ -194,8 +389,20 @@ for games in range(10000):
             reward += max(min(Playerscore_diff / 100000, 0.1), -0.1)
             done = False
 
+        # Tactical reward shaping teaches the model why certain moves matter.
+        if action_reason == "win":
+            reward += 2.0
+        elif action_reason == "block":
+            reward += 1.0
+        elif action_reason in ["model_safe", "explore_safe"]:
+            reward += 0.05
+
+        if allowed_opponent_win:
+            reward -= 1.5
+
         #Store transition in replay buffer
-        replay_buffer.add((state, action, reward, next_state, done))
+        if train_this_transition:
+            replay_buffer.add((state, action, reward, next_state, done))
 
         #Sample a batch of transitions from the replay buffer
         if replay_buffer.size() >= 64:
@@ -237,19 +444,32 @@ for games in range(10000):
             policy_model,
             games_to_play=100,
         )
-        eval_score = eval_wins - eval_losses
+        tactical_accuracy, tactical_correct, tactical_total = evaluate_tactical_accuracy(policy_model)
 
-        if win_rate > best_win_rate or (win_rate == best_win_rate and eval_score > best_eval_score):
+        current_win_rate = win_rate
+        current_tactical_accuracy = tactical_accuracy
+        current_combined_score = (0.40 * current_win_rate) + (0.60 * current_tactical_accuracy)
+
+        print(
+            f"Current evaluation at game {numGames}: "
+            f"win_rate={current_win_rate:.2f}, wins={eval_wins}, losses={eval_losses}, draws={eval_draws}, "
+            f"tactical_accuracy={current_tactical_accuracy:.2f} ({tactical_correct}/{tactical_total}), "
+            f"combined_score={current_combined_score:.2f}"
+        )
+
+        if current_combined_score > best_combined_score:
+            best_combined_score = current_combined_score
             best_win_rate = win_rate
-            best_eval_score = eval_score
             print(
-                f"New best gameplay model at game {numGames}: "
-                f"win_rate={win_rate:.2f}, wins={eval_wins}, losses={eval_losses}, draws={eval_draws}. "
-                "Saving checkpoint..."
+                f"New best combined model at game {numGames}: "
+                f"win_rate={win_rate:.2f}, tactical_accuracy={tactical_accuracy:.2f}, "
+                f"combined_score={current_combined_score:.2f}. Saving checkpoint..."
             )
             torch.save({
                 'model_state_dict': policy_model.state_dict(),
                 'win_rate_vs_random': best_win_rate,
+                'tactical_accuracy': current_tactical_accuracy,
+                'combined_score': best_combined_score,
                 'eval_wins': eval_wins,
                 'eval_losses': eval_losses,
                 'eval_draws': eval_draws,
@@ -258,20 +478,145 @@ for games in range(10000):
 
     #Every 100 games, we update the target model to match the policy model
     numGames += 1
-    if numGames % 100 == 0:
+    if numGames % 500 == 0:
         target_model.load_state_dict(policy_model.state_dict())
+
+    if numGames % 2000 == 0:
+        opponent_model.load_state_dict(policy_model.state_dict())
+        opponent_model.eval()
     
     if numGames % 100 == 0:
         latest_loss = current_loss if replay_buffer.size() >= 64 else 0.0
+
+        training_log.append({
+            "game": numGames,
+            "epsilon": epsilonStart,
+            "loss": latest_loss,
+            "reward": reward,
+            "current_win_rate": current_win_rate,
+            "best_win_rate": best_win_rate,
+            "current_tactical_accuracy": current_tactical_accuracy,
+            "current_combined_score": current_combined_score,
+            "best_combined_score": best_combined_score,
+            "opponent_type": opponent_type,
+            "last_action_reason": action_reason,
+        })
+
         print(
-            f"Game: {numGames}, Epsilon: {epsilonStart:.4f}, "
-            f"Loss: {latest_loss:.4f}, reward: {reward}, best_win_rate: {best_win_rate:.2f}"
+            f"Game: {numGames}, Opponent: {opponent_type}, Epsilon: {epsilonStart:.4f}, "
+            f"Loss: {latest_loss:.4f}, reward: {reward}, "
+            f"current_win_rate: {current_win_rate:.2f}, best_win_rate: {best_win_rate:.2f}, "
+            f"tactical_accuracy: {current_tactical_accuracy:.2f}, combined_score: {current_combined_score:.2f}"
         )
 
     
     
+
 if best_win_rate < 0:
     print("No gameplay-evaluated checkpoint was saved, so saving final model as fallback...")
     torch.save({'model_state_dict': policy_model.state_dict()}, 'connect4_policy_model.pth')
 else:
-    print(f"Training complete. Best saved model had win_rate_vs_random={best_win_rate:.2f}")
+    print(
+        f"Training complete. Best saved model had win_rate_vs_random={best_win_rate:.2f} "
+        f"and combined_score={best_combined_score:.2f}"
+    )
+
+
+# Save training plots
+if len(training_log) > 0:
+    games = [row["game"] for row in training_log]
+    losses = [row["loss"] for row in training_log]
+    epsilons = [row["epsilon"] for row in training_log]
+    rewards = [row["reward"] for row in training_log]
+
+    plt.figure()
+    plt.plot(games, losses)
+    plt.xlabel("Game")
+    plt.ylabel("Loss")
+    plt.title("Self-Play Training Loss")
+    plt.savefig("training_loss.png")
+    plt.close()
+
+    plt.figure()
+    plt.plot(games, epsilons)
+    plt.xlabel("Game")
+    plt.ylabel("Epsilon")
+    plt.title("Epsilon Decay During Training")
+    plt.savefig("epsilon_decay.png")
+    plt.close()
+
+    plt.figure()
+    plt.plot(games, rewards)
+    plt.xlabel("Game")
+    plt.ylabel("Reward")
+    plt.title("Reward During Training")
+    plt.savefig("training_reward.png")
+    plt.close()
+
+    valid_current_win_rate_games = []
+    valid_current_win_rates = []
+    valid_best_win_rate_games = []
+    valid_best_win_rates = []
+
+    for row in training_log:
+        if row["current_win_rate"] >= 0:
+            valid_current_win_rate_games.append(row["game"])
+            valid_current_win_rates.append(row["current_win_rate"])
+
+        if row["best_win_rate"] >= 0:
+            valid_best_win_rate_games.append(row["game"])
+            valid_best_win_rates.append(row["best_win_rate"])
+
+    if len(valid_current_win_rates) > 0:
+        plt.figure()
+        plt.plot(valid_current_win_rate_games, valid_current_win_rates)
+        plt.xlabel("Game")
+        plt.ylabel("Current Win Rate vs Random")
+        plt.title("Current Gameplay Win Rate Over Time")
+        plt.savefig("current_win_rate.png")
+        plt.close()
+
+    if len(valid_best_win_rates) > 0:
+        plt.figure()
+        plt.plot(valid_best_win_rate_games, valid_best_win_rates)
+        plt.xlabel("Game")
+        plt.ylabel("Best Win Rate vs Random")
+        plt.title("Best Gameplay Win Rate")
+        plt.savefig("best_win_rate.png")
+        plt.close()
+
+    valid_tactical_games = []
+    valid_tactical_accuracies = []
+    valid_combined_games = []
+    valid_combined_scores = []
+
+    for row in training_log:
+        if row["current_tactical_accuracy"] >= 0:
+            valid_tactical_games.append(row["game"])
+            valid_tactical_accuracies.append(row["current_tactical_accuracy"])
+
+        if row["current_combined_score"] >= 0:
+            valid_combined_games.append(row["game"])
+            valid_combined_scores.append(row["current_combined_score"])
+
+    if len(valid_tactical_accuracies) > 0:
+        plt.figure()
+        plt.plot(valid_tactical_games, valid_tactical_accuracies)
+        plt.xlabel("Game")
+        plt.ylabel("Tactical Accuracy")
+        plt.title("Tactical Accuracy Over Time")
+        plt.savefig("tactical_accuracy.png")
+        plt.close()
+
+    if len(valid_combined_scores) > 0:
+        plt.figure()
+        plt.plot(valid_combined_games, valid_combined_scores)
+        plt.xlabel("Game")
+        plt.ylabel("Combined Score")
+        plt.title("Combined Evaluation Score Over Time")
+        plt.savefig("combined_score.png")
+        plt.close()
+
+    print("Training plots saved as PNG files.")
+else:
+    print("No training log entries were recorded, so no plots were created.")
