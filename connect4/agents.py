@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import importlib.util
 from pathlib import Path
+import random
 from typing import List
 
 import numpy as np
@@ -114,6 +115,20 @@ def choose_best_move_raw(
     return int(np.argmax(masked))
 
 
+def find_immediate_winning_column(
+    game: ConnectFourGame,
+    player: int,
+    valid_columns: List[int],
+) -> int | None:
+    for column in valid_columns:
+        candidate = game.clone()
+        candidate.current_player = player
+        candidate.drop_piece(column)
+        if candidate.winner == player:
+            return column
+    return None
+
+
 def load_checkpoint(checkpoint_path: Path | str, model_class) -> torch.nn.Module:
     path = Path(checkpoint_path)
     if not path.exists():
@@ -147,6 +162,7 @@ class BaseAgent:
 class SemiRandomRLAgent(BaseAgent):
     name = "semi_random_rl"
     checkpoint_path: Path | None = None
+    random_move_probability: float = 0.15
 
     def __post_init__(self) -> None:
         if self.checkpoint_path is None:
@@ -157,6 +173,18 @@ class SemiRandomRLAgent(BaseAgent):
         moves = self._valid_moves(game)
         if len(moves) == 1:
             return moves[0]
+
+        winning_move = find_immediate_winning_column(game, player, moves)
+        if winning_move is not None:
+            return winning_move
+
+        blocking_move = find_immediate_winning_column(game, other_player(player), moves)
+        if blocking_move is not None:
+            return blocking_move
+
+        if random.random() < self.random_move_probability:
+            return random.choice(moves)
+
         return choose_best_move(
             self.model,
             game.board,
@@ -202,6 +230,14 @@ class SelfPlayAgent(BaseAgent):
 
         if len(moves) == 1:
             return moves[0]
+
+        winning_move = find_immediate_winning_column(game, player, moves)
+        if winning_move is not None:
+            return winning_move
+
+        blocking_move = find_immediate_winning_column(game, other_player(player), moves)
+        if blocking_move is not None:
+            return blocking_move
 
         # This model was trained with current-player perspective:
         # empty = 0, current player = 1, opponent = 2

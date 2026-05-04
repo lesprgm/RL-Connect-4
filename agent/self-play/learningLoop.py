@@ -5,10 +5,16 @@ import tempfile
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, PROJECT_ROOT)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CHECKPOINT_PATH = os.environ.get(
-    "SELF_PLAY_CHECKPOINT_PATH",
-    os.path.join(SCRIPT_DIR, "connect4_policy_model.pth"),
-)
+
+
+def resolve_checkpoint_path():
+    checkpoint_path = os.environ.get("SELF_PLAY_CHECKPOINT_PATH", "connect4_policy_model.pth")
+    if os.path.isabs(checkpoint_path):
+        return checkpoint_path
+    return os.path.join(SCRIPT_DIR, checkpoint_path)
+
+
+CHECKPOINT_PATH = resolve_checkpoint_path()
 
 import replayBuffer
 import neuralNetwork
@@ -44,6 +50,7 @@ def save_model_checkpoint(model, checkpoint_path, metadata=None):
     payload = {"model_state_dict": model.state_dict()}
     if metadata is not None:
         payload.update(metadata)
+    os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     torch.save(payload, checkpoint_path)
 
 
