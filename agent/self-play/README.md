@@ -31,24 +31,26 @@ Each output is a Q-value for one Connect Four column.
 Run from the project root:
 
 ```bash
-./agent/self-play/venv/bin/python agent/self-play/learningLoop.py
+./venv/bin/python agent/self-play/learningLoop.py
 ```
 
-The loop defaults to 10,000 games. These environment variables can override the defaults:
+The loop defaults to 50,000 games. These environment variables can override the defaults:
 
 ```bash
-SELF_PLAY_NUM_GAMES=10000
+SELF_PLAY_NUM_GAMES=50000
 SELF_PLAY_EVAL_START_GAME=3000
 SELF_PLAY_EVAL_INTERVAL=500
 SELF_PLAY_EVAL_GAMES=100
-SELF_PLAY_CHECKPOINT_PATH=agent/self-play/connect4_policy_model.pth
+SELF_PLAY_CHECKPOINT_PATH=connect4_policy_model.pth
 ```
+
+`SELF_PLAY_CHECKPOINT_PATH` is resolved relative to `agent/self-play/` unless you provide an absolute path.
 
 Example short smoke run:
 
 ```bash
 SELF_PLAY_NUM_GAMES=5 SELF_PLAY_EVAL_START_GAME=10000 \
-./agent/self-play/venv/bin/python agent/self-play/learningLoop.py
+./venv/bin/python agent/self-play/learningLoop.py
 ```
 
 ## RL Setup
@@ -58,7 +60,7 @@ The training loop uses:
 - **Policy model**: the model being optimized.
 - **Target model**: a periodically synced copy used for Q-learning targets.
 - **Frozen opponent model**: a periodically synced copy used as a more stable opponent.
-- **Evaluation opponent model**: a fixed copy used only to decide whether a new checkpoint is better.
+- **Semi-random DQN opponent**: the trained teammate model from `agent/r-learning/best_dqn.pth`.
 - **Replay buffer**: stores policy transitions and samples batches for training.
 
 If `connect4_policy_model.pth` already exists, training starts from that checkpoint. Otherwise, training starts from random initialization.
@@ -68,12 +70,12 @@ If `connect4_policy_model.pth` already exists, training starts from that checkpo
 Each training game chooses one opponent type:
 
 ```text
-45% live self-play
-35% frozen older self-play model
-20% random legal moves
+40% live self-play
+30% semi-random DQN opponent
+30% frozen older self-play model
 ```
 
-Only moves made by the live policy model are stored as policy transitions. Frozen-model and random-opponent moves are not stored as if they were policy decisions.
+Only moves made by the live policy model are stored as policy transitions. Frozen-model and semi-random DQN opponent moves are not stored as if they were policy decisions.
 
 ## Action Selection During Training
 
@@ -94,7 +96,6 @@ The training loop uses RL rewards and reward shaping:
 - terminal draw: small positive reward
 - terminal loss credit is applied to the earlier policy move that allowed the opponent to win
 - board-position shaping through `connect4.game.score_position`
-- small reward for moves selected by the policy path
 - penalty when a move allows the opponent an immediate win
 
 The Bellman target uses the self-play zero-sum form:
@@ -107,7 +108,7 @@ This is used because after the current player moves, the next state belongs to t
 
 ## Checkpoint Saving
 
-Every `SELF_PLAY_EVAL_INTERVAL` games after `SELF_PLAY_EVAL_START_GAME`, the current policy is evaluated against the fixed evaluation opponent model.
+Every `SELF_PLAY_EVAL_INTERVAL` games after `SELF_PLAY_EVAL_START_GAME`, the current policy is evaluated against the semi-random DQN opponent.
 
 The checkpoint is saved only if this fixed-baseline gameplay score improves:
 
@@ -123,7 +124,7 @@ Saved checkpoint:
 agent/self-play/connect4_policy_model.pth
 ```
 
-If no improved checkpoint is found and an existing checkpoint was loaded, the existing checkpoint is left unchanged. If no checkpoint existed, the final model is saved as a fallback.
+If no improved checkpoint is found and an existing checkpoint was loaded, the existing checkpoint is left unchanged. If no checkpoint existed, the final model is saved as a startup fallback so the app has a self-play checkpoint to load.
 
 ## Training Outputs
 
@@ -185,6 +186,5 @@ This matters because a 50/50 agent result can be misleading if Player 1 wins eve
 
 ## Current Limitations
 
-- The training loop does not currently train directly against the teammate DQN.
 - The deployed tactical safety layer improves play, but it is not pure neural-network inference.
 - Stronger performance as Player 2 likely requires retraining with better opponents and reward pressure against immediate threats.

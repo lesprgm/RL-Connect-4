@@ -1,6 +1,6 @@
-# R-Learning Agent (Semi-Random RL)
+# Semi-Random RL Agent
 
-A Deep Q-Network (DQN) agent that learns to play Connect Four through self-play against a semi-random opponent.
+A Deep Q-Network (DQN) agent that learns to play Connect Four against a semi-random training opponent. This is the model behind the **Human vs Semi-Random RL Agent** mode in the browser app.
 
 What changed recently (the two big improvements you see reflected in the code):
 - Target network: a frozen copy of the online network is used to compute stable TD targets. The target network is updated periodically (every 500 episodes) via `update_target()`.
@@ -22,7 +22,7 @@ The opponent plays randomly but opportunistically takes/block winning moves, pro
 Run from the project root:
 
 ```bash
-python3 agent/r-learning/train.py
+./venv/bin/python agent/r-learning/train.py
 ```
 
 Default: 50,000 episodes. Prints progress every 500 episodes and saves:
@@ -30,13 +30,26 @@ Default: 50,000 episodes. Prints progress every 500 episodes and saves:
 - agent/r-learning/best_dqn.pth — checkpoint with the best win rate
 - agent/r-learning/win_rate.png — win rate plot over training
 
-## Playing Against the Agent
+## Deployed App Behavior
 
 ```bash
-python3 run.py
+./venv/bin/python run.py
 ```
 
 Open `http://127.0.0.1:8000` and select **Human vs Semi-Random RL Agent**.
+
+The deployed `SemiRandomRLAgent` in `connect4/agents.py` loads `agent/r-learning/best_dqn.pth` strictly. If that checkpoint is missing or malformed, the app does not silently fall back to a different opponent.
+
+At move time, the live policy is:
+
+```text
+1. play an immediate winning move if one exists
+2. block an immediate opponent win if one exists
+3. play a random legal move 15% of the time
+4. otherwise choose the legal move with the highest DQN Q-value
+```
+
+The first two checks are tactical guardrails around the model, not a replacement for the checkpoint.
 
 ## Files
 
